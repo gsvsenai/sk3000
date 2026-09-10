@@ -1,0 +1,103 @@
+//BIBLIOTECAS WIFI
+#include <WiFi.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <WiFiManager.h>
+//BIBLIOTECA FUNÇÕES SINCRONAS
+#include <Ticker.h>
+
+#define LED_DESCONECTADO 33
+#define LED_CONECTADO 25
+#define LED_CLEAN_CONNECT 14
+#define LED_RECONNECT 12
+
+WiFiManager wifiManager;
+Ticker ledTicker;
+
+bool statusConnect = false; 
+
+//FUNÇÃO PISCAR LED
+void piscarLED() {
+  digitalWrite(LED_CONECTADO, !digitalRead(LED_CONECTADO));
+}
+
+//FUNÇÃO ABRIR PONTO DE ACESSO(SEM INTERROMPER)
+void configModeCallback(WiFiManager *myWiFiManager) {
+  ledTicker.detach();                 
+  digitalWrite(LED_CONECTADO, LOW);  
+  digitalWrite(LED_DESCONECTADO, HIGH); 
+  Serial.println("Portal AP aberto. Aguardando credenciais...");
+}
+
+//FUNÇÃO INICIAR CONEXÃO
+void saveConfigCallback() {
+  digitalWrite(LED_DESCONECTADO, LOW);    
+  ledTicker.attach(0.25, piscarLED);  
+  Serial.println("Credenciais enviadas! Tentando conectar na nova rede...");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_CONECTADO, OUTPUT); 
+  pinMode(LED_DESCONECTADO, OUTPUT);    
+
+  pinMode(LED_CLEAN_CONNECT, INPUT_PULLDOWN);
+  pinMode(LED_RECONNECT, INPUT_PULLDOWN);
+
+  digitalWrite(LED_CONECTADO, LOW);  
+  digitalWrite(LED_DESCONECTADO, LOW);     
+
+  //INICIAR INDICAÇÃO DE CONECTANDO
+  ledTicker.attach(0.25, piscarLED);
+
+  //DFININDO TEMPO DE TENTATIVA DE CONEXÃO
+  wifiManager.setConnectTimeout(3);
+
+  //DEFININDO TEMPO DE PORTAL ABERTO COMO NULO
+  wifiManager.setConfigPortalTimeout(0);
+
+  //DEFININDO PORTAL ABERTO COMO NÃO INTERRUPTOR
+  wifiManager.setConfigPortalBlocking(false);
+
+  //CHAMANDO FUNÇÕES DEFINIDAS DE CONEXÃO E PONTO DE ACESSO
+  wifiManager.setAPCallback(configModeCallback);
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  //DEFININDO CREDENCIAIS DE PONTO DE ACESSO
+  wifiManager.autoConnect("Smart-Kanban", ".sk3000.");
+}
+
+void loop() {
+  //MANTENDO PROCESSO DE CONEXÕES ATIVOS
+  wifiManager.process();
+
+  //BOTÃO PARA LIMPAR CONEXÃO SALVA E REINICIAR
+  if (digitalRead(LED_CLEAN_CONNECT) == HIGH) {
+    wifiManager.resetSettings(); 
+    delay(500);
+    ESP.restart();               
+  }
+
+  //BOTÃO PARA REINICIAR(REPETINDO CONEXÕES SALVAS)
+  if (digitalRead(LED_RECONNECT) == HIGH) {
+    delay(500);
+    ESP.restart();
+  }
+
+  //VERIFICAÇÃO CONSTANTE DE CONEXÕES ENQUANTO CONECTADO
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!statusConnect) {
+      ledTicker.detach();                 
+      digitalWrite(LED_DESCONECTADO, LOW);   
+      digitalWrite(LED_CONECTADO, HIGH);   
+      statusConnect = true;
+    }
+  } else {
+    if (statusConnect) {
+      digitalWrite(LED_CONECTADO, LOW);     
+      digitalWrite(LED_DESCONECTADO, HIGH);   
+      statusConnect = false;
+    }
+  }
+}
