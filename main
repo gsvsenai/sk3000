@@ -5,16 +5,22 @@
 #include <WiFiManager.h>
 //BIBLIOTECA FUNÇÕES SINCRONAS
 #include <Ticker.h>
+//BIBLIOTECA METODOS JSON
+#include <HTTPClient.h>
 
 #define LED_DESCONECTADO 33
 #define LED_CONECTADO 25
-#define LED_CLEAN_CONNECT 14
-#define LED_RECONNECT 12
+#define LED_ERRO_SUPABASE 32
+#define BUTTON_CLEAN_CONNECT 14
+#define INPUT_UPDATE_TOOL 13
+#define BUTTON_RECONNECT 12
+
 
 WiFiManager wifiManager;
 Ticker ledTicker;
 
-bool statusConnect = false; 
+bool statusConnect = false;
+bool statusFerramenta = false; 
 
 //FUNÇÃO PISCAR LED
 void piscarLED() {
@@ -36,14 +42,50 @@ void saveConfigCallback() {
   Serial.println("Credenciais enviadas! Tentando conectar na nova rede...");
 }
 
+//CONFIGURAÇÕES SUPABASE
+const char* SUPABASE_BASE_URL = "https://ogfkwgrholtagdqvpykj.supabase.co/rest/v1/"; 
+const char* SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nZmt3Z3Job2x0YWdkcXZweWtqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwNjQ4NTMsImV4cCI6MjEwNDY0MDg1M30.gnq60ev67wgkLpwg1oVJH-HisMI8uJXNqxHKp8wQkW4";
+
+// FUNÇÃO PARA ENVIAR DADOS EM FORMATO JSON
+// tabela: nome da tabela (ex: "kanban" ou "kanban?id=eq.10")
+// payloadJson: dados em formato JSON (ex: "{\"status\":\"CONCLUIDO\"}")
+// metodo: "POST" (para INSERT) ou "PATCH" (para UPDATE)
+bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
+  HTTPClient http;
+  String url = String(SUPABASE_BASE_URL) + tabelaComFiltro;
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+  http.addHeader("Prefer", "return=minimal"); 
+  http.setTimeout(4000); 
+
+  int httpCode = http.PATCH(payloadJson);
+  http.end();
+
+  if (httpCode >= 200 && httpCode < 300) {
+    digitalWrite(LED_ERRO_SUPABASE, LOW);
+    Serial.println("[SUPABASE] Ferramenta atualizada!");
+    return true;
+  } else {
+    digitalWrite(LED_ERRO_SUPABASE, HIGH); 
+    Serial.print("[SUPABASE] Erro HTTP: ");
+    Serial.println(httpCode);
+    return false;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
   pinMode(LED_CONECTADO, OUTPUT); 
-  pinMode(LED_DESCONECTADO, OUTPUT);    
+  pinMode(LED_DESCONECTADO, OUTPUT);
+  pinMode(LED_ERRO_SUPABASE, OUTPUT);    
 
-  pinMode(LED_CLEAN_CONNECT, INPUT_PULLDOWN);
-  pinMode(LED_RECONNECT, INPUT_PULLDOWN);
+  pinMode(BUTTON_CLEAN_CONNECT, INPUT_PULLDOWN);
+  pinMode(BUTTON_RECONNECT, INPUT_PULLDOWN);
+  pinMode(INPUT_UPDATE_TOOL, INPUT_PULLDOWN);
 
   digitalWrite(LED_CONECTADO, LOW);  
   digitalWrite(LED_DESCONECTADO, LOW);     
@@ -73,14 +115,14 @@ void loop() {
   wifiManager.process();
 
   //BOTÃO PARA LIMPAR CONEXÃO SALVA E REINICIAR
-  if (digitalRead(LED_CLEAN_CONNECT) == HIGH) {
+  if (digitalRead(BUTTON_CLEAN_CONNECT) == HIGH) {
     wifiManager.resetSettings(); 
     delay(500);
     ESP.restart();               
   }
 
   //BOTÃO PARA REINICIAR(REPETINDO CONEXÕES SALVAS)
-  if (digitalRead(LED_RECONNECT) == HIGH) {
+  if (digitalRead(BUTTON_RECONNECT) == HIGH) {
     delay(500);
     ESP.restart();
   }
@@ -95,9 +137,26 @@ void loop() {
     }
   } else {
     if (statusConnect) {
-      digitalWrite(LED_CONECTADO, LOW);     
-      digitalWrite(LED_DESCONECTADO, HIGH);   
+      digitalWrite(LED_CONECTADO, LOW);
+      digitalWrite(LED_DESCONECTADO, HIGH);
       statusConnect = false;
     }
   }
+
+  //INPUT ATUALIZANDO BANCO(FERRAMENTA EXEMPLO)
+  if (digitalRead(INPUT_UPDATE_TOOL) == HIGH && !statusFerramenta) {
+    atualizaFerramenta(
+      "Ferramentas?id=eq.1", 
+      "{\"status\":true, \"last_user\":1}"
+    );
+    statusFerramenta = true;
+  }
+  
+  if (digitalRead(INPUT_UPDATE_TOOL) == LOW && statusFerramenta) {
+    atualizaFerramenta(
+      "Ferramentas?id=eq.1", 
+      "{\"status\":false, \"last_user\":1}"
+    );
+    statusFerramenta=false;              
+  }  
 }
