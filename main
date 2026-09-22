@@ -15,12 +15,14 @@
 #define INPUT_UPDATE_TOOL 13
 #define BUTTON_RECONNECT 12
 
-
 WiFiManager wifiManager;
 Ticker ledTicker;
 
 bool statusConnect = false;
-bool statusFerramenta = false; 
+bool statusFerramenta = false;
+
+unsigned long ultimoPing = 0;
+const unsigned long intervaloPings = 500;
 
 //FUNÇÃO PISCAR LED
 void piscarLED() {
@@ -47,9 +49,6 @@ const char* SUPABASE_BASE_URL = "https://ogfkwgrholtagdqvpykj.supabase.co/rest/v
 const char* SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nZmt3Z3Job2x0YWdkcXZweWtqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwNjQ4NTMsImV4cCI6MjEwNDY0MDg1M30.gnq60ev67wgkLpwg1oVJH-HisMI8uJXNqxHKp8wQkW4";
 
 // FUNÇÃO PARA ENVIAR DADOS EM FORMATO JSON
-// tabela: nome da tabela (ex: "kanban" ou "kanban?id=eq.10")
-// payloadJson: dados em formato JSON (ex: "{\"status\":\"CONCLUIDO\"}")
-// metodo: "POST" (para INSERT) ou "PATCH" (para UPDATE)
 bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
   HTTPClient http;
   String url = String(SUPABASE_BASE_URL) + tabelaComFiltro;
@@ -66,13 +65,36 @@ bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
 
   if (httpCode >= 200 && httpCode < 300) {
     digitalWrite(LED_ERRO_SUPABASE, LOW);
-    Serial.println("[SUPABASE] Ferramenta atualizada!");
     return true;
   } else {
     digitalWrite(LED_ERRO_SUPABASE, HIGH); 
-    Serial.print("[SUPABASE] Erro HTTP: ");
-    Serial.println(httpCode);
     return false;
+  }
+}
+
+//ENVIOS PING DE CONEXÃO
+void enviaPing() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = String(SUPABASE_BASE_URL) + "esp32_status?id=eq.1";
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+  http.addHeader("Prefer", "return=minimal");
+  http.setTimeout(3000);
+
+  int httpCode = http.PATCH("{\"id\":1}");
+  http.end();
+
+  if (httpCode >= 200 && httpCode < 300) {
+    digitalWrite(LED_ERRO_SUPABASE, LOW);
+    return;
+  } else {
+    digitalWrite(LED_ERRO_SUPABASE, HIGH); 
+    return;
   }
 }
 
@@ -134,6 +156,7 @@ void loop() {
       digitalWrite(LED_DESCONECTADO, LOW);   
       digitalWrite(LED_CONECTADO, HIGH);   
       statusConnect = true;
+      enviaPing();      
     }
   } else {
     if (statusConnect) {
@@ -158,5 +181,11 @@ void loop() {
       "{\"status\":false, \"last_user\":1}"
     );
     statusFerramenta=false;              
-  }  
+  }
+
+  //ENVIA PINGS A CADA TEMPO DETERMINADO
+  if (millis() - ultimoPing >= intervaloPings) {
+      ultimoPing = millis();
+      enviaPing();
+    }  
 }
