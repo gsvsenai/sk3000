@@ -1,12 +1,17 @@
-//BIBLIOTECAS WIFI
+// BIBLIOTECAS WIFI
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <WiFiManager.h>
-//BIBLIOTECA FUNÇÕES SINCRONAS
+
+// BIBLIOTECA FUNÇÕES SÍNCRONAS
 #include <Ticker.h>
-//BIBLIOTECA METODOS JSON
+
+// BIBLIOTECA METODOS JSON / HTTP
 #include <HTTPClient.h>
+
+// BIBLIOTECA WEBSOCKET
+#include <WebSocketsClient.h>
 
 #define LED_DESCONECTADO 33
 #define LED_CONECTADO 25
@@ -17,19 +22,29 @@
 
 WiFiManager wifiManager;
 Ticker ledTicker;
+WebSocketsClient webSocket;
 
 bool statusConnect = false;
 bool statusFerramenta = false;
+bool wsConectado = false;
 
 unsigned long ultimoPing = 0;
-const unsigned long intervaloPings = 500;
+const unsigned long intervaloPings = 250; 
 
-//FUNÇÃO PISCAR LED
+unsigned long ultimoDebounce = 0;
+const unsigned long tempoDebounce = 30;
+bool ultimoEstadoLido = LOW;
+
+//CONFIGURAÇÕES SUPABASE
+const char* SUPABASE_HOST = "ogfkwgrholtagdqvpykj.supabase.co";
+const char* SUPABASE_BASE_URL = "https://ogfkwgrholtagdqvpykj.supabase.co/rest/v1/";
+const char* SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nZmt3Z3Job2x0YWdkcXZweWtqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwNjQ4NTMsImV4cCI6MjEwNDY0MDg1M30.gnq60ev67wgkLpwg1oVJH-HisMI8uJXNqxHKp8wQkW4";
+
 void piscarLED() {
   digitalWrite(LED_CONECTADO, !digitalRead(LED_CONECTADO));
 }
 
-//FUNÇÃO ABRIR PONTO DE ACESSO(SEM INTERROMPER)
+//FUNÇÃO INDICAR PORTAL ABERTO
 void configModeCallback(WiFiManager *myWiFiManager) {
   ledTicker.detach();                 
   digitalWrite(LED_CONECTADO, LOW);  
@@ -37,19 +52,60 @@ void configModeCallback(WiFiManager *myWiFiManager) {
   Serial.println("Portal AP aberto. Aguardando credenciais...");
 }
 
-//FUNÇÃO INICIAR CONEXÃO
+//FUNÇÃO CONECTANDO
 void saveConfigCallback() {
   digitalWrite(LED_DESCONECTADO, LOW);    
   ledTicker.attach(0.25, piscarLED);  
-  Serial.println("Credenciais enviadas! Tentando conectar na nova rede...");
+  Serial.println("Credenciais enviadas! Tentando conectar...");
 }
 
-//CONFIGURAÇÕES SUPABASE
-const char* SUPABASE_BASE_URL = "https://ogfkwgrholtagdqvpykj.supabase.co/rest/v1/"; 
-const char* SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nZmt3Z3Job2x0YWdkcXZweWtqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwNjQ4NTMsImV4cCI6MjEwNDY0MDg1M30.gnq60ev67wgkLpwg1oVJH-HisMI8uJXNqxHKp8wQkW4";
+//FUNÇÃO CANAL WEBSOCKET PARA VERIFICAR CONEXÃO
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      wsConectado = false;
+      digitalWrite(LED_ERRO_SUPABASE, HIGH);
+      Serial.println("[WS] Desconectado!");
+      break;
 
-// FUNÇÃO PARA ENVIAR DADOS EM FORMATO JSON
+    case WStype_CONNECTED:
+      wsConectado = true;
+      digitalWrite(LED_ERRO_SUPABASE, LOW);
+      Serial.println("[WS] Conectado com sucesso!");
+      
+      // Inscreve no canal realtime sempre que (re)conecta
+      webSocket.sendTXT("{\"topic\":\"realtime:esp32-status\",\"event\":\"phx_join\",\"payload\":{},\"ref\":\"1\"}");
+      break;
+
+    case WStype_TEXT:
+      break;
+
+    case WStype_ERROR:
+      wsConectado = false;
+      digitalWrite(LED_ERRO_SUPABASE, HIGH);
+      break;
+  }
+}
+
+//FUNÇÃO INICIAR CANAL WEBSOCKET
+void iniciarWebSocket() {
+  String path = "/realtime/v1/websocket?apikey=" + String(SUPABASE_KEY) + "&vsn=1.0.0";
+  webSocket.beginSSL(SUPABASE_HOST, 443, path.c_str());
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(2000);
+}
+
+//FUNÇÃO ENVIAR PINGS WEBSOCKET
+void enviaPingWebSocket() {
+  if (!wsConectado) return;
+  String msg = "{\"topic\":\"realtime:esp32-status\",\"event\":\"broadcast\",\"payload\":{\"type\":\"broadcast\",\"event\":\"ping\",\"payload\":{\"status\":\"online\",\"id\":1}},\"ref\":\"2\"}";
+  webSocket.sendTXT(msg);
+}
+
+//FUNÇÃO ATUALIZAR FERRAMENTA
 bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
   HTTPClient http;
   String url = String(SUPABASE_BASE_URL) + tabelaComFiltro;
   
@@ -58,7 +114,7 @@ bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
   http.addHeader("apikey", SUPABASE_KEY);
   http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
   http.addHeader("Prefer", "return=minimal"); 
-  http.setTimeout(4000); 
+  http.setTimeout(1000); // Reduzido para não congelar pings caso o banco demore
 
   int httpCode = http.PATCH(payloadJson);
   http.end();
@@ -69,32 +125,6 @@ bool atualizaFerramenta(String tabelaComFiltro, String payloadJson) {
   } else {
     digitalWrite(LED_ERRO_SUPABASE, HIGH); 
     return false;
-  }
-}
-
-//ENVIOS PING DE CONEXÃO
-void enviaPing() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  String url = String(SUPABASE_BASE_URL) + "esp32_status?id=eq.1";
-  
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", SUPABASE_KEY);
-  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
-  http.addHeader("Prefer", "return=minimal");
-  http.setTimeout(3000);
-
-  int httpCode = http.PATCH("{\"id\":1}");
-  http.end();
-
-  if (httpCode >= 200 && httpCode < 300) {
-    digitalWrite(LED_ERRO_SUPABASE, LOW);
-    return;
-  } else {
-    digitalWrite(LED_ERRO_SUPABASE, HIGH); 
-    return;
   }
 }
 
@@ -110,82 +140,78 @@ void setup() {
   pinMode(INPUT_UPDATE_TOOL, INPUT_PULLDOWN);
 
   digitalWrite(LED_CONECTADO, LOW);  
-  digitalWrite(LED_DESCONECTADO, LOW);     
+  digitalWrite(LED_DESCONECTADO, LOW);    
 
-  //INICIAR INDICAÇÃO DE CONECTANDO
   ledTicker.attach(0.25, piscarLED);
 
-  //DFININDO TEMPO DE TENTATIVA DE CONEXÃO
   wifiManager.setConnectTimeout(3);
-
-  //DEFININDO TEMPO DE PORTAL ABERTO COMO NULO
   wifiManager.setConfigPortalTimeout(0);
-
-  //DEFININDO PORTAL ABERTO COMO NÃO INTERRUPTOR
   wifiManager.setConfigPortalBlocking(false);
-
-  //CHAMANDO FUNÇÕES DEFINIDAS DE CONEXÃO E PONTO DE ACESSO
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
-  //DEFININDO CREDENCIAIS DE PONTO DE ACESSO
   wifiManager.autoConnect("Smart-Kanban", ".sk3000.");
+
+  statusFerramenta = (digitalRead(INPUT_UPDATE_TOOL) == HIGH);
 }
 
 void loop() {
-  //MANTENDO PROCESSO DE CONEXÕES ATIVOS
   wifiManager.process();
 
-  //BOTÃO PARA LIMPAR CONEXÃO SALVA E REINICIAR
-  if (digitalRead(BUTTON_CLEAN_CONNECT) == HIGH) {
-    wifiManager.resetSettings(); 
-    delay(500);
-    ESP.restart();               
-  }
-
-  //BOTÃO PARA REINICIAR(REPETINDO CONEXÕES SALVAS)
-  if (digitalRead(BUTTON_RECONNECT) == HIGH) {
-    delay(500);
-    ESP.restart();
-  }
-
-  //VERIFICAÇÃO CONSTANTE DE CONEXÕES ENQUANTO CONECTADO
   if (WiFi.status() == WL_CONNECTED) {
+    webSocket.loop();
+
     if (!statusConnect) {
       ledTicker.detach();                 
       digitalWrite(LED_DESCONECTADO, LOW);   
       digitalWrite(LED_CONECTADO, HIGH);   
       statusConnect = true;
-      enviaPing();      
+      iniciarWebSocket();
     }
   } else {
     if (statusConnect) {
       digitalWrite(LED_CONECTADO, LOW);
       digitalWrite(LED_DESCONECTADO, HIGH);
       statusConnect = false;
+      wsConectado = false;
     }
   }
 
-  //INPUT ATUALIZANDO BANCO(FERRAMENTA EXEMPLO)
-  if (digitalRead(INPUT_UPDATE_TOOL) == HIGH && !statusFerramenta) {
-    atualizaFerramenta(
-      "Ferramentas?id=eq.1", 
-      "{\"status\":true, \"last_user\":1}"
-    );
-    statusFerramenta = true;
-  }
-  
-  if (digitalRead(INPUT_UPDATE_TOOL) == LOW && statusFerramenta) {
-    atualizaFerramenta(
-      "Ferramentas?id=eq.1", 
-      "{\"status\":false, \"last_user\":1}"
-    );
-    statusFerramenta=false;              
+  if (digitalRead(BUTTON_CLEAN_CONNECT) == HIGH) {
+    wifiManager.resetSettings(); 
+    delay(300);
+    ESP.restart();               
   }
 
-  //ENVIA PINGS A CADA TEMPO DETERMINADO
+  if (digitalRead(BUTTON_RECONNECT) == HIGH) {
+    delay(300);
+    ESP.restart();
+  }
+
+  // LEITURA DA ATUALIZAÇÃO DA FERRAMENTA(SWITCH)
+  bool leituraPino = (digitalRead(INPUT_UPDATE_TOOL) == HIGH);
+
+  if (leituraPino != ultimoEstadoLido) {
+    ultimoDebounce = millis();
+    ultimoEstadoLido = leituraPino;
+  }
+
+  if ((millis() - ultimoDebounce) > tempoDebounce) {
+    if (leituraPino != statusFerramenta) {
+      statusFerramenta = leituraPino;
+      
+      // Envia notificação REST ao banco
+      if (statusFerramenta) {
+        atualizaFerramenta("Ferramentas?id=eq.1", "{\"status\":true, \"last_user\":1}");
+      } else {
+        atualizaFerramenta("Ferramentas?id=eq.1", "{\"status\":false, \"last_user\":1}");
+      }
+    }
+  }
+
+  // ENVIA PING A CADA 250MS PARA CONEXÃO
   if (millis() - ultimoPing >= intervaloPings) {
-      ultimoPing = millis();
-      enviaPing();
-    }  
+    ultimoPing = millis();
+    enviaPingWebSocket();
+  }  
 }
